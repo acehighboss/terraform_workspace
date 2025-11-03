@@ -129,3 +129,44 @@ resource "aws_db_instance" "quiz_rds" {
   vpc_security_group_ids = [aws_security_group.quiz_db_sg.id]
   db_subnet_group_name   = aws_db_subnet_group.quiz_rds_subnet_group.id
 }
+
+# 웹 서비스가 준비될 때까지 대기
+resource "null_resource" "quiz_web_ec2_time_wait" {
+  depends_on = [aws_instance.quiz_web_ec2_11]
+  
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = file("~/.ssh/bastion-host-key.pem")
+      # bastion_host_id는 이 모듈 내의 bastion ec2 리소스를 참조해야 합니다.
+      # 예: aws_instance.quiz_bastion_ec2.public_ip
+      host        = aws_instance.quiz_bastion_ec2.public_ip 
+    }
+
+    inline = [
+      "until curl -f http://${aws_instance.quiz_web_ec2_11.private_ip}:8080/boot/; do echo '웹 서비스 준비 중'; sleep 10;  done"
+    ]
+  }
+}
+
+# 인스턴스에서 AMI 생성
+resource "aws_ami_from_instance" "quiz_ami_instance" {
+  name               = "quiz-web-ami-${var.env}"
+  source_instance_id = aws_instance.quiz_web_ec2_11.id
+  tags = {
+    "Name" = "quiz-web-ami-${var.env}"
+    "env"  = var.env
+  }
+
+  depends_on = [null_resource.quiz_web_ec2_time_wait]
+}
+
+# 원본 인스턴스 종료 (ASG가 대체하므로)
+resource "null_resource" "quiz_web_ec2_terminate" {
+  depends_on = [aws_ami_from_instance.quiz_ami_instance]
+
+  provisioner "local-exec" {
+    command = "aws ec2 terminate-instances --instance-ids ${aws_instance.quiz_web_ec2_11.id} --profile terraform-user"
+  }
+}
